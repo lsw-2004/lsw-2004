@@ -14,14 +14,14 @@ from unity_env import UnityNavEnv, EnvConfig
 class PPOConfig:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
-    total_updates: int = 500
+    total_updates: int = 400
     rollout_steps: int = 1024
     gamma: float = 0.99
     gae_lambda: float = 0.95
 
     lr: float = 3e-4
     clip_coef: float = 0.2
-    ent_coef: float = 0.01
+    ent_coef: float = 0.005
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
 
@@ -31,7 +31,7 @@ class PPOConfig:
     action_dim: int = 2
     obs_dim: int = 187
 
-    save_dir: str = "./checkpoints"
+    save_dir: str = "./checkpoints/reward_shaping_15.0"
     save_every: int = 50
 
 
@@ -102,15 +102,15 @@ def main():
         obs_size=187,
         lidar_dim=180,
         reach_goal_radius=0.5,
-        max_steps=300,
-        progress_gain=1.0,
+        max_steps=350,
+        progress_gain=1.5,
         time_penalty=-0.002,
-        collision_penalty=-1.5,
-        success_bonus=2.0,
-        timeout_penalty=-0.5,
-        near_obstacle_threshold=0.3,
-        near_obstacle_penalty=-0.02,
-        action_l2_penalty=-0.001,
+        collision_penalty=-2.0,
+        success_bonus=15.0,
+        timeout_penalty=-2.0,
+        near_obstacle_threshold=0.4,
+        near_obstacle_penalty=-0.05,
+        action_l2_penalty=-0.0005,
     )
 
     ppo_cfg = PPOConfig()

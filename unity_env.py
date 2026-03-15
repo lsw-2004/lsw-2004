@@ -187,16 +187,17 @@ class UnityNavEnv:
         if collision:
             reward += self.cfg.collision_penalty
             done = True
+            timeout = False
 
-        if success:
+        elif success:
             reward += self.cfg.success_bonus
             done = True
+            collision = False
 
-        if timeout:
+        elif timeout:
             reward += self.cfg.timeout_penalty
             done = True
             truncated = True
-
         info = {
             "goal_dist": dist_now,
             "min_lidar": min_lidar,
