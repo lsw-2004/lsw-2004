@@ -22,7 +22,7 @@ class EvalConfig:
     behavior_name: str = "Navtest?team=0"
 
     # 改成你想评估的 checkpoint
-    checkpoint_path: str = r"./checkpoints/reward_shaping_15.0/ppo_update_0400.pt"
+    checkpoint_path: str = r"./checkpoints/reward_shaping_20.0/ppo_update_0400.pt"
 
     # 评估 episode 数
     num_eval_episodes: int = 50
@@ -38,14 +38,14 @@ class EvalConfig:
     max_steps: int = 200
 
     # reward 参数：建议与训练时一致，保证 return 可比
-    progress_gain: float = 1.5
-    time_penalty: float = -0.002
+    progress_gain: float = 1.0
+    time_penalty: float = -0.005
     collision_penalty: float = -2.0
-    success_bonus: float = 15.0
-    timeout_penalty: float = -2.0
+    success_bonus: float = 20.0
+    timeout_penalty: float = -2.5
     near_obstacle_threshold: float = 0.4
-    near_obstacle_penalty: float = -0.05
-    action_l2_penalty: float = -0.0005
+    near_obstacle_penalty: float = -0.04
+    action_l2_penalty: float = -0.0003
 
 
 # =========================
