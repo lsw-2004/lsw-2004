@@ -22,10 +22,10 @@ class EvalConfig:
     behavior_name: str = "Navtest?team=0"
 
     # 改成你想评估的 CNN-PPO checkpoint
-    checkpoint_path: str = r"./checkpoints/cnn_ppo/first_test/ppo_update_0100.pt"
+    checkpoint_path: str = r"./checkpoints/cnn_ppo/second_test/ppo_update_2700.pt"
 
     # 评估 episode 数
-    num_eval_episodes: int = 50
+    num_eval_episodes: int = 100
 
     # 是否显示 Unity 窗口
     no_graphics: bool = False
@@ -41,14 +41,14 @@ class EvalConfig:
     max_steps: int = 250
 
     # reward 参数：与 train_ppo_cnn.py 一致
-    progress_gain: float = 1.4
-    time_penalty: float = -0.0022
+    progress_gain: float = 1.5
+    time_penalty: float = -0.002
     collision_penalty: float = -2.0
-    success_bonus: float = 16.0
-    timeout_penalty: float = -2.2
+    success_bonus: float = 15.0
+    timeout_penalty: float = -2.0
     near_obstacle_threshold: float = 0.4
-    near_obstacle_penalty: float = -0.045
-    action_l2_penalty: float = -0.0004
+    near_obstacle_penalty: float = -0.005
+    action_l2_penalty: float = -0.0005
 
 
 # =========================
