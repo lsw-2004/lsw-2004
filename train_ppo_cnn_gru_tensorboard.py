@@ -30,19 +30,20 @@ class PPOConfig:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     seed: int = 42
 
-    total_updates: int = 1000
-    rollout_steps: int = 1024
+    total_updates: int = 2500          # 提高训练轮数
+    rollout_steps: int = 2048          # 增大：收集更多样本，减少相邻样本重叠
     gamma: float = 0.99
     gae_lambda: float = 0.95
 
     lr: float = 3e-4
     clip_coef: float = 0.2
-    ent_coef: float = 0.005
+    ent_coef: float = 0.01            # 提高：维持更强探索
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
 
-    update_epochs: int = 10
-    minibatch_size: int = 128
+    update_epochs: int = 6            # 适当提高：让策略学得更快
+    minibatch_size: int = 256         # 增大：减少梯度更新次数
+    target_kl: float = 0.03           # 放宽：让更新更积极
 
     obs_dim: int = 187
     lidar_dim: int = 180
@@ -51,8 +52,8 @@ class PPOConfig:
     action_dim: int = 2
     seq_len: int = 8
 
-    save_dir: str = "./checkpoints/cnn_gru_ppo_tb/exp1"
-    log_dir: str = "./runs/cnn_gru_ppo_tb/exp1"
+    save_dir: str = "./checkpoints/cnn_gru_ppo_tb/exp3"
+    log_dir: str = "./runs/cnn_gru_ppo_tb/exp3"
     save_every: int = 50
 
     use_prediction_features: bool = True
@@ -336,12 +337,12 @@ def main():
         obs_size=187,
         lidar_dim=180,
         reach_goal_radius=0.5,
-        max_steps=350,
-        progress_gain=1.5,
-        time_penalty=-0.002,
-        collision_penalty=-2.0,
-        success_bonus=15.0,
-        timeout_penalty=-2.2,
+        max_steps=450,
+        progress_gain=2.5,               # 提高：从 1.5 到 2.5，增强向目标前进的激励
+        time_penalty=-0.005,             # 提高：从 -0.002 到 -0.005，减少磨蹭
+        collision_penalty=-8.0,          # 保持：让碰撞足够痛苦
+        success_bonus=80.0,              # 大幅提高：从 40.0 到 80.0，强烈激励成功
+        timeout_penalty=-15.0,           # 大幅提高：从 -5.0 到 -15.0，让超时更痛苦
         near_obstacle_threshold=0.4,
         near_obstacle_penalty=-0.05,
         action_l2_penalty=-0.0005,
@@ -353,6 +354,13 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr)
     writer = SummaryWriter(log_dir=cfg.log_dir)
     writer.add_text("config", str(cfg))
+
+    # 学习率线性衰减：从 cfg.lr 衰减到 cfg.lr * 0.1
+    def lr_lambda(update):
+        frac = 1.0 - (update - 1) / cfg.total_updates
+        return frac * 0.9 + 0.1  # 从 1.0 衰减到 0.1
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     global_step = 0
     obs_np, _ = env.reset()
@@ -463,8 +471,9 @@ def main():
         batch_inds = np.arange(batch_size)
         last_pg_loss, last_v_loss, last_entropy, last_kl = 0.0, 0.0, 0.0, 0.0
         clipfracs = []
+        early_stop = False  # KL 早停标志
 
-        for _ in range(cfg.update_epochs):
+        for epoch in range(cfg.update_epochs):
             np.random.shuffle(batch_inds)
             for start in range(0, batch_size, cfg.minibatch_size):
                 end = start + cfg.minibatch_size
@@ -485,6 +494,11 @@ def main():
                 with torch.no_grad():
                     approx_kl = ((ratio - 1) - logratio).mean().item()
                     clipfracs.append(((ratio - 1.0).abs() > cfg.clip_coef).float().mean().item())
+
+                # KL 早停检查
+                if approx_kl > cfg.target_kl:
+                    early_stop = True
+                    break
 
                 pg_loss1 = -mb_adv * ratio
                 pg_loss2 = -mb_adv * torch.clamp(ratio, 1.0 - cfg.clip_coef, 1.0 + cfg.clip_coef)
@@ -508,6 +522,9 @@ def main():
                 last_entropy = float(entropy_loss.item())
                 last_kl = float(approx_kl)
 
+            if early_stop:
+                break
+
         sps = int(global_step / max(time.time() - start_time, 1e-6))
         writer.add_scalar("train/update", update, global_step)
         writer.add_scalar("train/global_step", global_step, global_step)
@@ -523,6 +540,7 @@ def main():
         writer.add_scalar("train/learning_rate", optimizer.param_groups[0]["lr"], global_step)
         writer.add_scalar("train/SPS", sps, global_step)
         writer.add_scalar("train/episodes_seen", train_ep_count, global_step)
+        writer.add_scalar("train/kl_early_stop", float(early_stop), global_step)  # 记录是否触发 KL 早停
 
         if train_returns_window:
             writer.add_scalar("train_window/return_mean_50", float(np.mean(train_returns_window)), global_step)
@@ -533,8 +551,11 @@ def main():
 
         print(
             f"update={update:04d} loss_pi={last_pg_loss:.4f} loss_v={last_v_loss:.4f} "
-            f"entropy={last_entropy:.4f} kl={last_kl:.5f} sps={sps}"
+            f"entropy={last_entropy:.4f} kl={last_kl:.5f} lr={optimizer.param_groups[0]['lr']:.2e} sps={sps}"
         )
+
+        # 学习率衰减步进
+        scheduler.step()
 
         if update % cfg.eval_every == 0:
             eval_stats = evaluate_policy(env, model, cfg, device, num_episodes=cfg.eval_episodes)
