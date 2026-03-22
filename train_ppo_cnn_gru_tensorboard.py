@@ -37,7 +37,7 @@ class PPOConfig:
 
     lr: float = 3e-4
     clip_coef: float = 0.2
-    ent_coef: float = 0.01            # 提高：维持更强探索
+    ent_coef: float = 0.005           # 降低：让策略收敛更稳定
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
 
@@ -52,8 +52,8 @@ class PPOConfig:
     action_dim: int = 2
     seq_len: int = 8
 
-    save_dir: str = "./checkpoints/cnn_gru_ppo_tb/exp3"
-    log_dir: str = "./runs/cnn_gru_ppo_tb/exp3"
+    save_dir: str = "./checkpoints/cnn_gru_ppo_tb/exp4"
+    log_dir: str = "./runs/cnn_gru_ppo_tb/exp4"
     save_every: int = 50
 
     use_prediction_features: bool = True
@@ -62,6 +62,10 @@ class PPOConfig:
     eval_every: int = 10          # 每多少个 update 做一次评估
     eval_episodes: int = 50        # 每次评估跑多少回合
     eval_deterministic: bool = True
+
+    # 恢复训练
+    resume: bool = True                     # 从 checkpoint 恢复
+    resume_checkpoint: str = "./checkpoints/cnn_gru_ppo_tb/exp3/ppo_gru_update_1000.pt"
 
     @property
     def low_dim(self) -> int:
@@ -344,7 +348,7 @@ def main():
         success_bonus=80.0,              # 大幅提高：从 40.0 到 80.0，强烈激励成功
         timeout_penalty=-15.0,           # 大幅提高：从 -5.0 到 -15.0，让超时更痛苦
         near_obstacle_threshold=0.4,
-        near_obstacle_penalty=-0.05,
+        near_obstacle_penalty=-0.15,         # 提高：从 -0.05 到 -0.15，增强避障激励
         action_l2_penalty=-0.0005,
     )
 
@@ -355,14 +359,33 @@ def main():
     writer = SummaryWriter(log_dir=cfg.log_dir)
     writer.add_text("config", str(cfg))
 
+    # 恢复训练
+    start_update = 1
+    global_step = 0
+    if cfg.resume and cfg.resume_checkpoint:
+        if os.path.exists(cfg.resume_checkpoint):
+            print(f"Resuming from checkpoint: {cfg.resume_checkpoint}")
+            ckpt = torch.load(cfg.resume_checkpoint, map_location=device)
+            model.load_state_dict(ckpt["model"])
+            optimizer.load_state_dict(ckpt["optimizer"])
+            start_update = ckpt.get("update", 1) + 1
+            global_step = ckpt.get("global_step", 0)
+            print(f"Resumed from update {start_update - 1}, global_step {global_step}")
+        else:
+            print(f"Checkpoint not found: {cfg.resume_checkpoint}, starting from scratch")
+
     # 学习率线性衰减：从 cfg.lr 衰减到 cfg.lr * 0.1
     def lr_lambda(update):
         frac = 1.0 - (update - 1) / cfg.total_updates
         return frac * 0.9 + 0.1  # 从 1.0 衰减到 0.1
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    
+    # 如果恢复训练，调整 scheduler 到正确的位置
+    if cfg.resume and cfg.resume_checkpoint and start_update > 1:
+        for _ in range(1, start_update):
+            scheduler.step()
 
-    global_step = 0
     obs_np, _ = env.reset()
     obs_hist = init_obs_history(obs_np, cfg.seq_len)
     enhanced_obs = build_enhanced_obs(obs_hist, cfg)
@@ -379,7 +402,7 @@ def main():
 
     start_time = time.time()
 
-    for update in range(1, cfg.total_updates + 1):
+    for update in range(start_update, cfg.total_updates + 1):
         seq_obs_buf: List[torch.Tensor] = []
         action_buf: List[torch.Tensor] = []
         logprob_buf: List[torch.Tensor] = []
