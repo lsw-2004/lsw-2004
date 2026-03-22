@@ -220,7 +220,7 @@ class UnityNavEnv:
 
 if __name__ == "__main__":
     cfg = EnvConfig(
-        file_name=r"D:\DRL_Navigation\Builds\Project_1.exe",   # 改成你的 build 路径
+        file_name=r"/home/dell/DRL_Navigation/Corriidor_linux/Corridor_linux.x86_64",   # 改成你的 build 路径
         behavior_name="Navtest?team=0",
         no_graphics=False,
     )
