@@ -48,20 +48,21 @@ class PPOConfig:
     gamma: float = 0.99
     gae_lambda: float = 0.95
 
-    # 优化器参数
-    lr: float = 3e-4
+    # 优化器参数 - 修改1: 降低学习率提高稳定性
+    lr: float = 1e-4                    # 从 3e-4 降低到 1e-4
     clip_coef: float = 0.2
     
-    # Entropy 衰减
-    ent_coef_start: float = 0.01
-    ent_coef_end: float = 0.001
+    # Entropy 衰减 - 修改2: 提高下限防止探索过早停止
+    ent_coef_start: float = 0.02       # 从 0.01 增加到 0.02
+    ent_coef_end: float = 0.005        # 从 0.001 增加到 0.005 (关键!)
+    entropy_target: float = 0.5        # 新增: entropy 下限
     
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
 
     update_epochs: int = 6
     minibatch_size: int = 256
-    target_kl: float = 0.02
+    target_kl: float = 0.015           # 从 0.02 降低到 0.015，更严格
 
     # 观测参数
     obs_dim: int = 187
@@ -82,8 +83,12 @@ class PPOConfig:
     save_every: int = 50
 
     # 评估
-    eval_every: int = 10
-    eval_episodes: int = 50
+    eval_every: int = 20               # 从 10 改为 20
+    eval_episodes: int = 100           # 从 50 增加到 100
+
+    # 最佳模型保存 - 新增
+    save_best: bool = True
+    best_success_rate: float = 0.0
 
     # 恢复训练
     resume: bool = False
@@ -806,7 +811,7 @@ def main():
     env_path = args.env if args.env else get_env_path()
     print(f"Using environment: {env_path}")
 
-    # 环境配置
+    # 环境配置 - 修改3: 增强碰撞惩罚和预警机制
     env_cfg = EnvConfig(
         file_name=env_path,
         behavior_name="Navtest?team=0",
@@ -817,11 +822,11 @@ def main():
         max_steps=450,
         progress_gain=3.0,
         time_penalty=-0.008,
-        collision_penalty=-10.0,
+        collision_penalty=-20.0,         # 从 -10 增加到 -20 (关键!)
         success_bonus=100.0,
-        timeout_penalty=-20.0,
-        near_obstacle_threshold=0.5,
-        near_obstacle_penalty=-0.2,
+        timeout_penalty=-15.0,           # 从 -20 减少到 -15
+        near_obstacle_threshold=0.8,     # 从 0.5 增加到 0.8 (更早预警)
+        near_obstacle_penalty=-0.3,      # 从 -0.2 增加到 -0.3
         action_l2_penalty=-0.001,
     )
 
@@ -933,7 +938,7 @@ def main():
                 print(
                     f"[train ep] update={update:04d} step={global_step} "
                     f"ret={episode_return:.3f} len={episode_len} "
-                    f"success={info['success']} collision={info['collision']}"
+                    f"success={info['success']} collision={info['collision']} timeout={info['timeout']}"
                 )
 
                 next_obs_np, _ = env.reset()
@@ -969,9 +974,12 @@ def main():
         )
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        # Entropy 系数衰减
+        # Entropy 系数计算 - 修改4: 渐进式衰减 + 动态调整
         progress = (update - 1) / cfg.total_updates
-        current_ent_coef = cfg.ent_coef_start + (cfg.ent_coef_end - cfg.ent_coef_start) * progress
+        base_ent_coef = cfg.ent_coef_start + (cfg.ent_coef_end - cfg.ent_coef_start) * progress
+        
+        # 确保 ent_coef 不低于最小值
+        current_ent_coef = max(base_ent_coef, cfg.ent_coef_end)
 
         # PPO 更新
         batch_size = cfg.rollout_steps
@@ -1044,6 +1052,8 @@ def main():
         if train_returns_window:
             writer.add_scalar("train_window/success_rate_50", float(np.mean(train_success_window)), global_step)
             writer.add_scalar("train_window/collision_rate_50", float(np.mean(train_collision_window)), global_step)
+            writer.add_scalar("train_window/timeout_rate_50", float(np.mean(train_timeout_window)), global_step)
+            writer.add_scalar("train_window/return_mean_50", float(np.mean(train_returns_window)), global_step)
 
         print(f"update={update:04d} loss_pi={last_pg_loss:.4f} entropy={last_entropy:.4f} "
               f"ent_coef={current_ent_coef:.5f} sps={sps}")
@@ -1056,9 +1066,24 @@ def main():
             writer.add_scalar("eval/success_rate", eval_stats["success_rate"], global_step)
             writer.add_scalar("eval/collision_rate", eval_stats["collision_rate"], global_step)
             writer.add_scalar("eval/return_mean", eval_stats["return_mean"], global_step)
+            writer.add_scalar("eval/length_mean", eval_stats["length_mean"], global_step)
 
             print(f"[eval] update={update:04d} succ={eval_stats['success_rate']:.3f} "
-                  f"coll={eval_stats['collision_rate']:.3f}")
+                  f"coll={eval_stats['collision_rate']:.3f} ret={eval_stats['return_mean']:.2f}")
+
+            # 修改5: 保存最佳模型
+            if cfg.save_best and eval_stats["success_rate"] > cfg.best_success_rate:
+                cfg.best_success_rate = eval_stats["success_rate"]
+                best_path = os.path.join(cfg.save_dir, "best_model.pt")
+                torch.save({
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "update": update,
+                    "global_step": global_step,
+                    "best_success_rate": cfg.best_success_rate,
+                    "model_type": "cnn_transformer_v2",
+                }, best_path)
+                print(f"  -> New best model! success_rate={cfg.best_success_rate:.3f}")
 
             # 重置
             obs_np, _ = env.reset()
@@ -1077,6 +1102,7 @@ def main():
                 "optimizer": optimizer.state_dict(),
                 "update": update,
                 "global_step": global_step,
+                "best_success_rate": cfg.best_success_rate,
                 "model_type": "cnn_transformer_v2",
             }, save_path)
             print(f"saved to {save_path}")
