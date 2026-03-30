@@ -11,13 +11,20 @@ from mlagents_envs.base_env import ActionTuple
 @dataclass
 class EnvConfig:
     file_name: Optional[str] = None          # Unity build 路径；编辑器模式可设为 None
-    behavior_name: str = "Navtest?team=0"  # Unity 场景中 Agent 的 behavior name
+    behavior_name: str = "Navtest?team=0"    # Unity 场景中 Agent 的 behavior name
     seed: int = 1
     no_graphics: bool = False
     timeout_wait: int = 60
 
-    obs_size: int = 187
-    lidar_dim: int = 180
+    # 360° LiDAR + 7 low-dim observations
+    lidar_dim: int = 360
+    obs_size: int = 367
+
+    # 以下参数保留，尽量不改动整体逻辑
+    max_observed_pedestrians: int = 3
+    pedestrian_obs_range: float = 8.0
+    pedestrian_max_speed: float = 2.0
+    pedestrian_radius: float = 0.30
 
     reach_goal_radius: float = 0.5
     max_steps: int = 300
@@ -32,10 +39,25 @@ class EnvConfig:
     near_obstacle_penalty: float = -0.02
     action_l2_penalty: float = -0.001
 
+    # 与 Unity NavAgent 中 _maxScenarioSize 保持一致
+    scenario_max_size: float = 30.0
+
+    # 与 Unity SimpleLidar2D 中 maxDistance 保持一致
+    lidar_max_distance: float = 10.0
+
 
 class UnityNavEnv:
     """
     把 Unity ML-Agents build 包成一个单智能体连续控制环境。
+    当前观测结构（来自 Unity NavAgent）:
+      [0 : lidar_dim)           -> normalized lidar
+      [lidar_dim + 0]           -> dir.x
+      [lidar_dim + 1]           -> dir.z
+      [lidar_dim + 2]           -> normalized goal distance
+      [lidar_dim + 3]           -> normalized goal angle in [-1, 1]
+      [lidar_dim + 4]           -> normalized linear velocity
+      [lidar_dim + 5]           -> normalized angular velocity
+      [lidar_dim + 6]           -> collision flag
     """
 
     def __init__(self, cfg: EnvConfig):
@@ -65,6 +87,37 @@ class UnityNavEnv:
         self.step_count = 0
 
         self._bind_first_agent()
+
+    # ----------------------------
+    # index helpers
+    # ----------------------------
+    @property
+    def goal_dir_x_idx(self) -> int:
+        return self.cfg.lidar_dim + 0
+
+    @property
+    def goal_dir_z_idx(self) -> int:
+        return self.cfg.lidar_dim + 1
+
+    @property
+    def goal_dist_idx(self) -> int:
+        return self.cfg.lidar_dim + 2
+
+    @property
+    def goal_angle_idx(self) -> int:
+        return self.cfg.lidar_dim + 3
+
+    @property
+    def linear_vel_idx(self) -> int:
+        return self.cfg.lidar_dim + 4
+
+    @property
+    def angular_vel_idx(self) -> int:
+        return self.cfg.lidar_dim + 5
+
+    @property
+    def collision_idx(self) -> int:
+        return self.cfg.lidar_dim + 6
 
     def _bind_first_agent(self):
         decision_steps, terminal_steps = self.env.get_steps(self.behavior_name)
@@ -97,31 +150,23 @@ class UnityNavEnv:
             )
 
     def _extract_goal_dist(self, obs: np.ndarray) -> float:
-        # 结构:
-        # [0:180] lidar
-        # [180] dir.x
-        # [181] dir.z
-        # [182] normalized distance
-        # [183] angle
-        # [184] linear vel
-        # [185] angular vel
-        # [186] collision flag
-        norm_dist = float(obs[182])
-        # Unity 里是 dist / _maxScenarioSize，当前 _maxScenarioSize = 30f
-        return norm_dist * 30.0
+        norm_dist = float(obs[self.goal_dist_idx])
+        return norm_dist * self.cfg.scenario_max_size
+
+    def _extract_goal_angle(self, obs: np.ndarray) -> float:
+        # Unity 里是 angle / 180f，因此恢复成弧度
+        norm_angle = float(obs[self.goal_angle_idx])
+        return norm_angle * np.pi
 
     def _extract_min_lidar(self, obs: np.ndarray) -> float:
         lidar = obs[:self.cfg.lidar_dim]
-        # Unity 里 lidar 已经除以 maxDistance；默认 maxDistance=10f
-        return float(np.min(lidar) * 10.0)
+        return float(np.min(lidar) * self.cfg.lidar_max_distance)
 
     def _extract_collision(self, obs: np.ndarray) -> bool:
-        return bool(obs[186] > 0.5)
+        return bool(obs[self.collision_idx] > 0.5)
 
     def reset(self) -> Tuple[np.ndarray, Dict]:
-        # 关键点：
-        # 你当前 Unity 中 reset 走的是 Agent episode begin + EpisodeManager.ResetEpisode()
-        # 对于外部控制，最稳妥方式是直接 reset 整个环境。
+        # 外部控制最稳妥方式：reset 整个环境
         self.env.reset()
         self._bind_first_agent()
 
@@ -198,8 +243,10 @@ class UnityNavEnv:
             reward += self.cfg.timeout_penalty
             done = True
             truncated = True
+
         info = {
             "goal_dist": dist_now,
+            "goal_angle": self._extract_goal_angle(obs),
             "min_lidar": min_lidar,
             "collision": collision,
             "success": success,
@@ -220,9 +267,11 @@ class UnityNavEnv:
 
 if __name__ == "__main__":
     cfg = EnvConfig(
-        file_name=r"/home/dell/DRL_Navigation/Corriidor_linux/Corridor_linux.x86_64",   # 改成你的 build 路径
+        file_name=r"/home/dell/DRL_Navigation/Corriidor_linux/Corridor_linux.x86_64",
         behavior_name="Navtest?team=0",
         no_graphics=False,
+        lidar_dim=360,
+        obs_size=367,
     )
 
     env = UnityNavEnv(cfg)

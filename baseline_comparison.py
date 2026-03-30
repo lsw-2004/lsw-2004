@@ -177,126 +177,10 @@ class DWAPolicy:
 
 
 # =============================================================================
-# ORCA (Optimal Reciprocal Collision Avoidance) - 简化版
+# ORCA (Optimal Reciprocal Collision Avoidance) - 行人状态感知版
+# 从 orca_baseline.py 导入完整实现
 # =============================================================================
-@dataclass
-class ORCAConfig:
-    """ORCA 算法配置（简化版）"""
-    
-    v_max: float = 1.0
-    w_max: float = 1.0
-    robot_radius: float = 0.25
-    time_horizon: float = 2.0      # 避障预测时间
-    safety_margin: float = 0.3     # 安全边距
-    
-    # 目标吸引力
-    goal_gain: float = 1.2
-    
-    # 动作平滑
-    max_delta_v: float = 0.4
-    max_delta_w: float = 0.5
-
-
-class ORCAPolicy:
-    """
-    ORCA 策略实现（简化版）
-    
-    由于我们只能观测到 LiDAR 而非其他智能体的精确位置和速度，
-    这里实现一个基于 LiDAR 的简化 ORCA 变体。
-    """
-    
-    def __init__(self, cfg: ORCAConfig):
-        self.cfg = cfg
-        self.prev_action = np.zeros(2, dtype=np.float32)
-        
-    def reset(self):
-        self.prev_action[:] = 0.0
-
-    def act(self, obs: np.ndarray) -> np.ndarray:
-        """根据观测选择动作"""
-        lidar_norm = obs[:180]
-        goal_dist = obs[182] * 30.0
-        goal_angle = obs[183] * math.pi
-        cur_v = float(obs[184])
-        cur_w = float(obs[185])
-        
-        lidar_m = lidar_norm * 10.0
-
-        # 计算目标方向的速度偏好
-        preferred_v = self._compute_preferred_velocity(goal_angle, goal_dist)
-        
-        # 根据 LiDAR 信息调整速度，避免碰撞
-        safe_v = self._adjust_for_obstacles(preferred_v, lidar_m, cur_v, cur_w)
-        
-        # 动作平滑
-        v = np.clip(safe_v[0], 
-                    cur_v - self.cfg.max_delta_v, 
-                    cur_v + self.cfg.max_delta_v)
-        v = np.clip(v, 0.0, self.cfg.v_max)
-        
-        w = np.clip(safe_v[1],
-                    cur_w - self.cfg.max_delta_w,
-                    cur_w + self.cfg.max_delta_w)
-        w = np.clip(w, -self.cfg.w_max, self.cfg.w_max)
-        
-        action = np.array([v, w], dtype=np.float32)
-        self.prev_action = action.copy()
-        return action
-
-    def _compute_preferred_velocity(self, goal_angle: float, goal_dist: float) -> np.ndarray:
-        """计算朝向目标的偏好速度"""
-        # 角速度：减小目标角度误差
-        w = -np.sign(goal_angle) * min(abs(goal_angle), self.cfg.w_max) * self.cfg.goal_gain
-        
-        # 线速度：角度小时前进快，角度大时减速转向
-        if abs(goal_angle) < 0.3:
-            v = self.cfg.v_max
-        elif abs(goal_angle) < 1.0:
-            v = self.cfg.v_max * (1.0 - abs(goal_angle))
-        else:
-            v = 0.0
-        
-        # 近目标时减速
-        if goal_dist < 2.0:
-            v *= min(goal_dist / 2.0 + 0.3, 1.0)
-        
-        return np.array([v, w])
-
-    def _adjust_for_obstacles(self, preferred_v: np.ndarray, lidar_m: np.ndarray,
-                               cur_v: float, cur_w: float) -> np.ndarray:
-        """根据障碍物调整速度"""
-        v, w = preferred_v
-        
-        # 检查前方障碍物
-        front_sector = lidar_m[75:105]  # 前方 30 度范围
-        front_min = float(np.min(front_sector)) if len(front_sector) > 0 else 10.0
-        
-        # 左右障碍物
-        left_sector = lidar_m[0:60]
-        right_sector = lidar_m[120:180]
-        left_min = float(np.min(left_sector)) if len(left_sector) > 0 else 10.0
-        right_min = float(np.min(right_sector)) if len(right_sector) > 0 else 10.0
-        
-        safe_dist = self.cfg.robot_radius + self.cfg.safety_margin
-        
-        # 前方有障碍物
-        if front_min < safe_dist + 1.0:
-            # 减速
-            v = min(v, max(0, front_min - safe_dist) * 0.5)
-            
-            # 选择转向方向
-            if left_min > right_min:
-                w = 0.5 + 0.3 * (1.0 - front_min / (safe_dist + 1.0))
-            else:
-                w = -0.5 - 0.3 * (1.0 - front_min / (safe_dist + 1.0))
-        
-        # 侧方障碍物
-        if left_min < safe_dist:
-            w = min(w, -0.3)
-        if right_min < safe_dist:
-            w = max(w, 0.3)
-        
-        return np.array([v, w])
+from orca_baseline import ORCAPolicy, ORCAConfig
 
 
 # =============================================================================
@@ -575,21 +459,13 @@ def compare_baselines(env_cfg: EnvConfig, n_episodes: int = 50,
 # 主函数
 # =============================================================================
 if __name__ == "__main__":
-    # 环境配置 - 使用相对路径
-    import sys
-    import os
-    
-    # 获取当前脚本所在目录
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    # Windows 下的 Unity Build 路径
-    build_path = os.path.join(script_dir, "Builds", "Project_1.exe")
-    
+    # 环境配置 - Windows 本地运行
+    # 使用 202 维观测的新 Build（包含行人状态）
     env_cfg = EnvConfig(
-        file_name=build_path,
+        file_name=r"D:\DRL_Navigation\Builds_202\Project_1.exe",
         behavior_name="Navtest?team=0",
         no_graphics=False,
-        obs_size=187,
+        obs_size=202,  # 更新为 202 维（180 LiDAR + 7 低维 + 3*5 行人）
         lidar_dim=180,
         reach_goal_radius=0.5,
         max_steps=350,

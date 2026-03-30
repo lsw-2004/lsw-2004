@@ -1,15 +1,12 @@
 """
-实验6: 加入行人运动预测
+实验7: 基于 Exp6，LiDAR 维度升级为 360°
 
-核心改进:
-1. [行人检测] 从 LiDAR 历史帧检测动态障碍物
-2. [速度估计] 利用多帧 LiDAR 估计行人速度
-3. [轨迹预测] 基于匀速直线假设预测行人未来位置
-4. [风险地图] 生成时空风险地图指导避障
+核心改动:
+1. LiDAR 维度从 180 维升级到 360 维 (全向感知)
+2. Unity 端已导出 360° LiDAR 环境
+3. 其他配置与 Exp6 完全一致
 
-假设: 行人匀速直线运动 (用户确认)
-
-LiDAR 历史: 使用最近 8 帧 (约 0.8 秒，假设 10Hz)
+观测结构: LiDAR(360) + raw_low(7) + static_feat(6) + ped_feat(5*8=40) = 413 维
 """
 import os
 import random
@@ -55,8 +52,8 @@ class PPOConfig:
     minibatch_size: int = 256
     target_kl: float = 0.02  # 更保守更新
 
-    obs_dim: int = 187
-    lidar_dim: int = 180
+    obs_dim: int = 367           # Unity 输出: 360 LiDAR + 7 low-dim
+    lidar_dim: int = 360         # 360° LiDAR
     raw_low_dim: int = 7
     action_dim: int = 2
     seq_len: int = 8
@@ -70,8 +67,8 @@ class PPOConfig:
     # 静态障碍物风险特征 (新增)
     static_feat_dim: int = 6         # 静态障碍物特征维度
 
-    save_dir: str = "./checkpoints/cnn_gru_ppo_tb/exp6"
-    log_dir: str = "./runs/cnn_gru_ppo_tb/exp6"
+    save_dir: str = "./checkpoints/cnn_gru_ppo_tb/exp7"
+    log_dir: str = "./runs/cnn_gru_ppo_tb/exp7"
     save_every: int = 50
 
     eval_every: int = 10
@@ -107,15 +104,15 @@ class PedestrianPredictor:
     4. 预测未来位置
     """
     
-    def __init__(self, lidar_dim: int = 180, max_pedestrians: int = 5,
+    def __init__(self, lidar_dim: int = 360, max_pedestrians: int = 5,
                  prediction_horizon: float = 1.5, dt: float = 0.1):
         self.lidar_dim = lidar_dim
         self.max_pedestrians = max_pedestrians
         self.prediction_horizon = prediction_horizon
         self.dt = dt  # 帧间隔 (秒)
         
-        # LiDAR 角度
-        self.angles = np.linspace(-np.pi/2, np.pi/2, lidar_dim)
+        # LiDAR 角度 - 360° 全向
+        self.angles = np.linspace(-np.pi, np.pi, lidar_dim, endpoint=False)
         
         # 存储历史检测到的行人
         self.pedestrian_tracks: Dict[int, Dict] = {}  # id -> {positions, velocities}
@@ -304,23 +301,31 @@ class PedestrianPredictor:
 
     def compute_static_features(self, lidar: np.ndarray) -> np.ndarray:
         """
-        计算静态障碍物风险特征 (6维)
+        计算静态障碍物风险特征 (6维) - 适配 360° LiDAR
         
         特征:
         - [0]: 全局最小距离
-        - [1]: 前方 60° 最小距离
-        - [2]: 左侧 60° 最小距离
-        - [3]: 右侧 60° 最小距离
+        - [1]: 前方 90° 最小距离
+        - [2]: 左侧 90° 最小距离
+        - [3]: 右侧 90° 最小距离
         - [4]: 最近障碍物角度 (归一化 -1 到 1)
         - [5]: 危险程度分数 (0-1)
         """
         features = np.zeros(6, dtype=np.float32)
         
-        # 分区域
-        left = slice(0, 60)
-        front = slice(60, 120)
-        right = slice(120, 180)
+        # 360° LiDAR 分区域 (每个区域 90° = 90 个点)
+        # 角度范围: -180° 到 +180°，前方为 0°
+        # rear:     -180° to -90°  (索引 0-89)
+        # left:     -90° to 0°     (索引 90-179)
+        # front:    0° to 90°      (索引 180-269)
+        # right:    90° to 180°    (索引 270-359)
         
+        rear = slice(0, 90)
+        left = slice(90, 180)
+        front = slice(180, 270)
+        right = slice(270, 360)
+        
+        rear_lidar = lidar[rear]
         left_lidar = lidar[left]
         front_lidar = lidar[front]
         right_lidar = lidar[right]
@@ -334,13 +339,13 @@ class PedestrianPredictor:
         features[2] = float(np.min(left_lidar))
         features[3] = float(np.min(right_lidar))
         
-        # 最近障碍物角度
+        # 最近障碍物角度 (归一化到 -1 到 1)
         min_idx = int(np.argmin(lidar))
-        min_angle = (min_idx - 90) / 90.0  # 归一化到 -1 到 1 (左负右正)
+        # 索引 0-359 映射到角度 -180° 到 +180°
+        min_angle = (min_idx - 180) / 180.0
         features[4] = min_angle
         
         # 危险程度分数
-        # 距离越近、在前方、危险程度越高
         front_risk = 1.0 / (features[1] + 0.3)
         global_risk = 1.0 / (min_dist + 0.3)
         features[5] = min(0.7 * global_risk + 0.3 * front_risk, 1.0)
@@ -378,7 +383,7 @@ def build_enhanced_obs(obs_hist: Deque[np.ndarray],
     """
     构建增强观测
     
-    结构: LiDAR(180) + raw_low(7) + static_feat(6) + ped_feat(5*8=40) = 233 维
+    结构: LiDAR(360) + raw_low(7) + static_feat(6) + ped_feat(5*8=40) = 413 维
     """
     obs = obs_hist[-1].astype(np.float32)
     lidar = obs[:cfg.lidar_dim]
@@ -415,9 +420,9 @@ def init_seq_history(first_enhanced_obs: np.ndarray, seq_len: int) -> Deque[np.n
 # =========================
 # 模型
 # =========================
-class CNNGRUActorCriticExp6(nn.Module):
+class CNNGRUActorCriticExp7(nn.Module):
     """
-    Exp6 模型: 处理 LiDAR + 行人预测特征
+    Exp7 模型: 处理 360° LiDAR + 行人预测特征
     """
     
     def __init__(self, lidar_dim: int, low_dim: int, action_dim: int, 
@@ -427,13 +432,15 @@ class CNNGRUActorCriticExp6(nn.Module):
         self.low_dim = low_dim
         self.action_dim = action_dim
 
-        # CNN LiDAR 编码器
+        # CNN LiDAR 编码器 - 适配 360 维输入
         self.lidar_encoder = nn.Sequential(
             nn.Conv1d(1, 16, kernel_size=5, stride=2, padding=2),
             nn.ReLU(),
             nn.Conv1d(16, 32, kernel_size=5, stride=2, padding=2),
             nn.ReLU(),
             nn.Conv1d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(64, 64, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
             nn.Flatten(),
         )
@@ -596,15 +603,16 @@ def get_env_path() -> str:
     script_dir = os.path.dirname(os.path.abspath(__file__))
     
     if platform.system() == "Linux":
+        # Exp7: 360° LiDAR 环境
         linux_paths = [
-            os.path.join(script_dir, "Corriidor_linux/Corridor_linux.x86_64"),
-            "./Corriidor_linux/Corridor_linux.x86_64",
-            "/home/dell/DRL_Navigation/Corriidor_linux/Corridor_linux.x86_64",
+            "/home/dell/DRL_Navigation/Corridor_linux_360/Corridor_linux_360.x86_64",
+            os.path.join(script_dir, "Corridor_linux_360/Corridor_linux_360.x86_64"),
+            "./Corridor_linux_360/Corridor_linux_360.x86_64",
         ]
         for p in linux_paths:
             if os.path.exists(p):
                 return p
-        raise FileNotFoundError("Could not find Unity environment for Linux.")
+        raise FileNotFoundError("Could not find Unity environment for Linux (360 LiDAR).")
     else:
         win_paths = [
             r"D:\DRL_Navigation\Builds\Project_1.exe",
@@ -641,12 +649,13 @@ def main():
     env_path = args.env if args.env else get_env_path()
     print(f"Using environment: {env_path}")
 
+    # 360° LiDAR 环境配置
     env_cfg = EnvConfig(
         file_name=env_path,
         behavior_name="Navtest?team=0",
         no_graphics=args.no_graphics,
-        obs_size=187,
-        lidar_dim=180,
+        obs_size=367,
+        lidar_dim=360,
         reach_goal_radius=0.5,
         max_steps=450,
         progress_gain=3.5,
@@ -669,7 +678,7 @@ def main():
         prediction_horizon=cfg.prediction_horizon,
     )
     
-    model = CNNGRUActorCriticExp6(
+    model = CNNGRUActorCriticExp7(
         cfg.lidar_dim, cfg.low_dim, cfg.action_dim, gru_hidden_dim=256
     ).to(device)
     
@@ -719,14 +728,15 @@ def main():
     start_time = time.time()
 
     print("\n" + "="*60)
-    print("EXP6 - 行人运动预测")
+    print("EXP7 - 360° LiDAR 行人运动预测")
     print("="*60)
     print("核心改进:")
+    print(f"  - LiDAR 维度: 180 -> 360 (全向感知)")
     print(f"  - LiDAR 历史帧数: {cfg.lidar_history_len}")
     print(f"  - 最多检测行人数: {cfg.pedestrian_max_num}")
     print(f"  - 每个行人特征维度: {cfg.pedestrian_feat_dim}")
     print(f"  - 预测时间范围: {cfg.prediction_horizon}s")
-    print(f"  - 行人特征: [位置x,y, 速度vx,vy, 距离, 速度大小, 预测距离, 风险分数]")
+    print(f"  - 增强观测维度: {cfg.enhanced_obs_dim}")
     print("="*60 + "\n")
 
     for update in range(start_update, cfg.total_updates + 1):
